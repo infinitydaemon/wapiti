@@ -25,22 +25,25 @@ def shellshock_callback(request: httpx.Request):
 @pytest.mark.asyncio
 @respx.mock
 async def test_whole_stuff():
-    respx.get("http://perdu.com/").mock(return_value=httpx.Response(200))
+    ips = ["10.0.0.1", "10.0.0.2", "10.0.0.3"] # Broaden the span here ...
+    for ip in ips:
+        respx.get(f"http://{ip}/").mock(return_value=httpx.Response(200))
 
-    respx.get(url__regex=r"http://perdu.com/.*").mock(side_effect=shellshock_callback)
+        respx.get(url__regex=f"http://{ip}/.*").mock(side_effect=shellshock_callback)
 
     persister = AsyncMock()
     all_requests = []
 
-    request = Request("http://perdu.com/")
-    request.path_id = 1
-    all_requests.append(request)
+    for ip in ips:
+        request = Request(f"http://{ip}/")
+        request.path_id = ips.index(ip) + 1
+        all_requests.append(request)
 
-    request = Request("http://perdu.com/vuln/")
-    request.path_id = 2
-    all_requests.append(request)
+        request = Request(f"http://{ip}/vuln/")
+        request.path_id = ips.index(ip) + 1
+        all_requests.append(request)
 
-    crawler_configuration = CrawlerConfiguration(Request("http://perdu.com/"), timeout=1)
+    crawler_configuration = CrawlerConfiguration(Request(f"http://{ips[0]}/"), timeout=1)
     async with AsyncCrawler.with_configuration(crawler_configuration) as crawler:
         options = {"timeout": 10, "level": 2}
 
@@ -49,7 +52,8 @@ async def test_whole_stuff():
         for request in all_requests:
             await module.attack(request)
 
-        assert persister.add_payload.call_count == 1
-        assert persister.add_payload.call_args_list[0][1]["module"] == "shellshock"
-        assert persister.add_payload.call_args_list[0][1]["category"] == "Command execution"
-        assert persister.add_payload.call_args_list[0][1]["request"].url == "http://perdu.com/vuln/"
+        assert persister.add_payload.call_count == len(ips)
+        for i in range(len(ips)):
+            assert persister.add_payload.call_args_list[i][1]["module"] == "shellshock"
+            assert persister.add_payload.call_args_list[i][1]["category"] == "Command execution"
+            assert persister.add_payload.call_args_list[i][1]["request"].url == f"http://{ips[i]}/vuln/"
