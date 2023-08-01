@@ -87,7 +87,8 @@ async def test_url_detection():
             (
                 'additional',
                 (
-                    '{"name": "Microsoft ASP.NET", "versions": [], "categories": ["Web '
+                    '{"name": "Microsoft ASP.NET", "versions": [], "cpe": '
+                    '"cpe:2.3:a:microsoft:asp.net:*:*:*:*:*:*:*:*", "categories": ["Web '
                     'frameworks"], "groups": ["Web development"]}'
                 ),
                 "Fingerprint web technology",
@@ -95,8 +96,9 @@ async def test_url_detection():
             (
                 'additional',
                 (
-                    '{"name": "Outlook Web App", "versions": [], "categories": ["Webmail"], '
-                    '"groups": ["Communication"]}'
+                    '{"name": "Outlook Web App", "versions": [], "cpe": '
+                    '"cpe:2.3:a:microsoft:outlook_web_access:*:*:*:*:*:*:*:*", "categories": '
+                    '["Webmail"], "groups": ["Communication"]}'
                 ),
                 "Fingerprint web technology",
             )
@@ -137,9 +139,11 @@ async def test_html_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Atlassian FishEye", "versions": ["2.8.4"], "categories": '
+            '{"name": "Atlassian FishEye", "versions": ["2.8.4"], '
+            '"cpe": "cpe:2.3:a:atlassian:fisheye:*:*:*:*:*:*:*:*", "categories": '
             '["Development"], "groups": ["Web development"]}'
         )
+
 
 @pytest.mark.asyncio
 @respx.mock
@@ -180,18 +184,18 @@ async def test_dom_detection():
 
         assert persister.add_payload.call_count
         expected_result = [
-            '{"name": "Astra Widgets", "versions": ["1.5.4"], "categories": ["WordPress plugins", "Widgets"], "groups": ["Add-ons", "Other"]}',
-            '{"name": "GLPI", "versions": [], "categories": ["Web frameworks", "CRM"], "groups": ["Web development", "Marketing", "Business tools"]}',
-            '{"name": "Sellacious", "versions": [], "categories": ["Ecommerce"], "groups": ["Sales"]}',
-            '{"name": "SmugMug", "versions": [], "categories": ["Photo galleries"], "groups": ["Content", "Media"]}',
-            '{"name": "Affiliate B", "versions": [], "categories": ["Affiliate programs", "Advertising"], "groups": ["Marketing"]}',
-            '{"name": "Cart Functionality", "versions": [], "categories": ["Ecommerce"], "groups": ["Sales"]}',
-            '{"name": "PHP", "versions": [], "categories": ["Programming languages"], "groups": ["Web development"]}'
+            '{"name": "Astra Widgets", "versions": ["1.5.4"], "cpe": "", "categories": ["WordPress plugins", "Widgets"], "groups": ["Add-ons", "Other"]}',
+            '{"name": "GLPI", "versions": [], "cpe": "cpe:2.3:a:glpi-project:glpi:*:*:*:*:*:*:*:* ", "categories": ["Web frameworks", "CRM"], '
+            '"groups": ["Web development", "Marketing", "Business tools"]}',
+            '{"name": "Sellacious", "versions": [], "cpe": "", "categories": ["Ecommerce"], "groups": ["Sales"]}',
+            '{"name": "SmugMug", "versions": [], "cpe": "", "categories": ["Photo galleries"], "groups": ["Content", "Media"]}',
+            '{"name": "Affiliate B", "versions": [], "cpe": "", "categories": ["Affiliate programs", "Advertising"], "groups": ["Marketing"]}',
+            '{"name": "Cart Functionality", "versions": [], "cpe": "", "categories": ["Ecommerce"], "groups": ["Sales"]}',
+            '{"name": "PHP", "versions": [], "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*", "categories": ["Programming languages"], "groups": ["Web development"]}'
 
         ]
         for arg in persister.add_payload.call_args_list:
             assert arg[1]["info"] in expected_result
-
 
 
 @pytest.mark.asyncio
@@ -227,7 +231,7 @@ async def test_script_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Chart.js", "versions": ["1.4.2"], "categories": ["JavaScript '
+            '{"name": "Chart.js", "versions": ["1.4.2"], "cpe": "", "categories": ["JavaScript '
             'graphics"], "groups": ["Web development"]}'
         )
 
@@ -265,8 +269,46 @@ async def test_cookies_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "CodeIgniter", "versions": ["2+"], "categories": ["Web '
-            'frameworks"], "groups": ["Web development"]}'
+            '{"name": "CodeIgniter", "versions": ["2+"], "cpe": "cpe:2.3:a:codeigniter:codeigniter:*:*:*:*:*:*:*:*", '
+            '"categories": ["Web frameworks"], "groups": ["Web development"]}'
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cookies_whatever_value_detection():
+    # Test if application is detected using its cookies with empty values
+    respx.get("http://perdu.com/").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Vous Etes Perdu ?</title></head><body><h1>Perdu sur l'Internet ?</h1> \
+            <h2>Pas de panique, on va vous aider</h2> \
+            <strong><pre>    * <----- vous &ecirc;tes ici</pre></strong> \
+            </body></html>",
+            headers={"Set-Cookie": "OJSSID=5646"}
+        )
+    )
+
+    persister = AsyncMock()
+    home_dir = os.getenv("HOME") or os.getenv("USERPROFILE") or "/home"
+    base_dir = os.path.join(home_dir, ".wapiti")
+    persister.CONFIG_DIR = os.path.join(base_dir, "config")
+
+    request = Request("http://perdu.com/")
+    request.path_id = 1
+
+    crawler_configuration = CrawlerConfiguration(Request("http://perdu.com/"))
+    async with AsyncCrawler.with_configuration(crawler_configuration) as crawler:
+        options = {"timeout": 10, "level": 2}
+
+        module = ModuleWapp(crawler, persister, options, Event(), crawler_configuration)
+
+        await module.attack(request)
+
+        assert persister.add_payload.call_count
+        assert persister.add_payload.call_args_list[0][1]["info"] == (
+            '{"name": "Open Journal Systems", "versions": [], "cpe": "cpe:2.3:a:public_knowledge_project:open_journal_systems:*:*:*:*:*:*:*:*", '
+            '"categories": ["DMS"], "groups": ["Content"]}'
         )
 
 
@@ -303,7 +345,8 @@ async def test_headers_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Cherokee", "versions": ["1.3.4"], "categories": ["Web servers"], "groups": ["Servers"]}'
+            '{"name": "Cherokee", "versions": ["1.3.4"], "cpe": "cpe:2.3:a:cherokee-project:cherokee:*:*:*:*:*:*:*:*", '
+            '"categories": ["Web servers"], "groups": ["Servers"]}'
         )
 
 
@@ -341,7 +384,7 @@ async def test_meta_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Planet", "versions": ["1.6.2"], "categories": ["Feed readers"], "groups": ["Content"]}'
+            '{"name": "Planet", "versions": ["1.6.2"], "cpe": "", "categories": ["Feed readers"], "groups": ["Content"]}'
         )
 
 
@@ -381,8 +424,8 @@ async def test_multi_detection():
 
         assert persister.add_payload.call_count
         assert persister.add_payload.call_args_list[-1][1]["info"] == (
-            '{"name": "WordPress", "versions": ["5.6.1"], "categories": ["CMS", "Blogs"], '
-            '"groups": ["Content"]}'
+            '{"name": "WordPress", "versions": ["5.6.1"], "cpe": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*", '
+            '"categories": ["CMS", "Blogs"], "groups": ["Content"]}'
         )
 
 
@@ -419,12 +462,12 @@ async def test_implies_detection():
 
         assert persister.add_payload.call_count == 3
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Backdrop", "versions": ["4.5"], "categories": ["CMS"], "groups": '
+            '{"name": "Backdrop", "versions": ["4.5"], "cpe": "cpe:2.3:a:backdropcms:backdrop:*:*:*:*:*:*:*:*", "categories": ["CMS"], "groups": '
             '["Content"]}'
         )
         assert persister.add_payload.call_args_list[-1][1]["info"] == (
-            '{"name": "PHP", "versions": [], "categories": ["Programming languages"], '
-            '"groups": ["Web development"]}'
+            '{"name": "PHP", "versions": [], "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*", '
+            '"categories": ["Programming languages"], "groups": ["Web development"]}'
         )
 
 
@@ -462,12 +505,13 @@ async def test_vulnerabilities():
         assert persister.add_payload.call_count == 5
         # FIrst one is an additional
         assert persister.add_payload.call_args_list[0][1]["info"] == (
-            '{"name": "Backdrop", "versions": ["4.5"], "categories": ["CMS"], "groups": ["Content"]}'
+            '{"name": "Backdrop", "versions": ["4.5"], "cpe": "cpe:2.3:a:backdropcms:backdrop:*:*:*:*:*:*:*:*", "categories": ["CMS"], "groups": ["Content"]}'
         )
         assert persister.add_payload.call_args_list[0][1]["category"] == "Fingerprint web technology"
 
         assert persister.add_payload.call_args_list[3][1]["info"] == (
-            '{"name": "Cherokee", "versions": ["1.3.4"], "categories": ["Web servers"], "groups": ["Servers"]}'
+            '{"name": "Cherokee", "versions": ["1.3.4"], "cpe": "cpe:2.3:a:cherokee-project:cherokee:*:*:*:*:*:*:*:*", '
+            '"categories": ["Web servers"], "groups": ["Servers"]}'
         )
         assert persister.add_payload.call_args_list[3][1]["category"] == "Fingerprint web server"
 
@@ -525,17 +569,20 @@ async def test_merge_with_and_without_redirection():
         expected_results = [
             (
                 'additional',
-                '{"name": "Microsoft ASP.NET", "versions": [], "categories": ["Web frameworks"], "groups": ["Web development"]}',
+                '{"name": "Microsoft ASP.NET", "versions": [], "cpe": "cpe:2.3:a:microsoft:asp.net:*:*:*:*:*:*:*:*", '
+                '"categories": ["Web frameworks"], "groups": ["Web development"]}',
                 "Fingerprint web technology"
             ),
             (
                 'additional',
-                '{"name": "Outlook Web App", "versions": ["15.0.1497.26"], "categories": ["Webmail"], "groups": ["Communication"]}',
+                '{"name": "Outlook Web App", "versions": ["15.0.1497.26"], "cpe": "cpe:2.3:a:microsoft:outlook_web_access:*:*:*:*:*:*:*:*", '
+                '"categories": ["Webmail"], "groups": ["Communication"]}',
                 "Fingerprint web technology"
             ),
             (
                 'vulnerability',
-                '{"name": "Outlook Web App", "versions": ["15.0.1497.26"], "categories": ["Webmail"], "groups": ["Communication"]}',
+                '{"name": "Outlook Web App", "versions": ["15.0.1497.26"], "cpe": "cpe:2.3:a:microsoft:outlook_web_access:*:*:*:*:*:*:*:*", '
+                '"categories": ["Webmail"], "groups": ["Communication"]}',
                 "Fingerprint web application framework"
             ),
         ]

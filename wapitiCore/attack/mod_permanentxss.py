@@ -16,18 +16,19 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-from urllib.parse import quote
 from os.path import join as path_join
-from typing import Optional
+from typing import Optional, Tuple, Dict
 
 from httpx import ReadTimeout, RequestError
 
 from wapitiCore.main.log import log_red, log_orange, log_verbose
-from wapitiCore.attack.attack import Attack, PayloadType, Mutator, random_string
+from wapitiCore.attack.attack import Attack, Mutator, random_string, Parameter, ParameterSituation
 from wapitiCore.language.vulnerability import Messages
-from wapitiCore.definitions.stored_xss import NAME, WSTG_CODE
+from wapitiCore.definitions.stored_xss import NAME as XSS_NAME, WSTG_CODE as XSS_WSTG_CODE
+from wapitiCore.definitions.stored_html_injection import NAME as HTMLI_NAME, WSTG_CODE as HTMLI_WSTG_CODE
 from wapitiCore.definitions.internal_error import WSTG_CODE as INTERNAL_ERROR_WSTG_CODE
 from wapitiCore.definitions.resource_consumption import WSTG_CODE as RESOURCE_CONSUMPTION_WSTG_CODE
+from wapitiCore.model import PayloadInfo
 from wapitiCore.net import Request, Response
 from wapitiCore.net.xss_utils import generate_payloads, valid_xss_content_type, check_payload
 from wapitiCore.net.csp_utils import has_strong_csp
@@ -45,14 +46,12 @@ class ModulePermanentxss(Attack):
 
     # Attempted payload injection from mod_xss.
     # key is tainted value, dict values are (mutated_request, parameter, flags)
-    tried_xss = {}
+    tried_xss: Dict[str, Tuple[Request, Parameter]] = {}
 
-    # key = xss code, valid = (payload, flags)
-    successful_xss = {}
+    # key = taint code, value = (evil request, payload info, parameter)
+    successful_xss: Dict[str, Tuple[Request, PayloadInfo]] = {}
 
     PAYLOADS_FILE = path_join(Attack.DATA_DIR, "xssPayloads.ini")
-
-    MSG_VULN = "Stored XSS vulnerability"
 
     RANDOM_WEBSITE = f"https://{random_string(length=6)}.com/"
 
@@ -84,12 +83,9 @@ class ModulePermanentxss(Attack):
 
         html = Html(response.content, request.url)
 
-        # Should we look for taint codes sent with GET in the webpages?
-        # Exploiting those may imply sending more GET requests
-
-        # Search in the page source for every taint code used by mod_xss
+        # Search in the page source for every taint code that was used previously by mod_xss
         for taint in self.tried_xss:
-            input_request = self.tried_xss[taint][0]
+            input_request, parameter = self.tried_xss[taint]
 
             # Such situations should not occur as it would be stupid to block POST (or GET) requests for mod_xss
             # and not mod_permanentxss, but it is possible so let's filter that.
@@ -104,104 +100,76 @@ class ModulePermanentxss(Attack):
                 # Did mod_xss saw this as a reflected XSS ?
                 if taint in self.successful_xss:
                     # Yes, it means XSS payloads were injected, not just tainted code.
-                    payload, flags = self.successful_xss[taint]
-
+                    # Either we are on the same vulnerability that mod_xss found or our injections appears at different
+                    # places (which would be awkward)
+                    evil_request, payload_info = self.successful_xss[taint]
+                    # Using rules declared in the INI, check it we find the payload in the webpage
                     if check_payload(
                         self.DATA_DIR,
                         self.PAYLOADS_FILE,
                         self.external_endpoint,
                         self.proto_endpoint,
                         html,
-                        flags,
+                        payload_info,
                         taint
                     ):
-                        # If we can find the payload again, this is in fact a stored XSS
-                        get_params = input_request.get_params
-                        post_params = input_request.post_params
-                        file_params = input_request.file_params
-                        referer = input_request.referer
+                        # Success, this is a stored XSS / HTML injection vulnerability
+                        vuln_type = XSS_NAME if payload_info.injection_type == "javascript" else HTMLI_NAME
+                        if request.path == evil_request.path:
+                            description = (
+                                f"{vuln_type} vulnerability found via injection "
+                                f"in the parameter {parameter.name}"
+                            )
+                        else:
+                            description = (
+                                f"{vuln_type} vulnerability found in {request.url} by injecting"
+                                f" the parameter {parameter.name} of {input_request.path}"
+                            )
+                        if has_strong_csp(response, html):
+                            description += ".\nWarning: Content-Security-Policy is present!"
 
-                        # The following trick may seems dirty but it allows to treat GET and POST requests
-                        # the same way.
-                        for params_list in [get_params, post_params, file_params]:
-                            for i, __ in enumerate(params_list):
-                                parameter, value = params_list[i]
-                                parameter = quote(parameter)
-                                if value != taint:
-                                    continue
+                        await self.add_vuln_high(
+                            request_id=request.path_id,
+                            category=HTMLI_NAME if payload_info.injection_type == "html" else XSS_NAME,
+                            request=evil_request,
+                            parameter=parameter.name,
+                            info=description,
+                            wstg=HTMLI_WSTG_CODE if payload_info.injection_type == "html" else XSS_WSTG_CODE,
+                        )
 
-                                if params_list is file_params:
-                                    params_list[i][1][0] = payload
-                                else:
-                                    params_list[i][1] = payload
+                        if parameter.is_qs_injection:
+                            injection_msg = Messages.MSG_QS_INJECT
+                        else:
+                            injection_msg = Messages.MSG_PARAM_INJECT
 
-                                # we found the xss payload again -> stored xss vuln
-                                evil_request = Request(
-                                    input_request.path,
-                                    method=input_request.method,
-                                    get_params=get_params,
-                                    post_params=post_params,
-                                    file_params=file_params,
-                                    referer=referer
-                                )
+                        log_red("---")
+                        log_red(
+                            injection_msg,
+                            XSS_NAME if payload_info.injection_type == "javascript" else HTMLI_NAME,
+                            request.path,
+                            parameter.name
+                        )
 
-                                if request.path == input_request.path:
-                                    description = (
-                                        f"Permanent XSS vulnerability found via injection in the parameter {parameter}"
-                                    )
-                                else:
-                                    description = (
-                                        f"Permanent XSS vulnerability found in {request.url} by injecting"
-                                        f" the parameter {parameter} of {input_request.path}"
-                                    )
-                                if has_strong_csp(response, html):
-                                    description += ".\nWarning: Content-Security-Policy is present!"
+                        if has_strong_csp(response, html):
+                            log_red("Warning: Content-Security-Policy is present!")
 
-                                await self.add_vuln_high(
-                                    request_id=request.path_id,
-                                    category=NAME,
-                                    request=evil_request,
-                                    parameter=parameter,
-                                    info=description,
-                                    wstg=WSTG_CODE
-                                )
+                        log_red(Messages.MSG_EVIL_REQUEST)
+                        log_red(evil_request.http_repr())
+                        log_red("---")
 
-                                if parameter == "QUERY_STRING":
-                                    injection_msg = Messages.MSG_QS_INJECT
-                                else:
-                                    injection_msg = Messages.MSG_PARAM_INJECT
-
-                                log_red("---")
-                                log_red(
-                                    injection_msg,
-                                    self.MSG_VULN,
-                                    request.path,
-                                    parameter
-                                )
-
-                                if has_strong_csp(response, html):
-                                    log_red("Warning: Content-Security-Policy is present!")
-
-                                log_red(Messages.MSG_EVIL_REQUEST)
-                                log_red(evil_request.http_repr())
-                                log_red("---")
-                                # FIX: search for the next code in the webpage
-
-                # Ok the content is stored, but will we be able to inject javascript?
+                # Here mod_xss did inject the tainted value but as it was not reflected in the same webpage it didn't
+                # go further. It is now our job to send the payloads to webpage A and check the output in webpage B
                 else:
-                    parameter = self.tried_xss[taint][1]
                     payloads = generate_payloads(response.content, taint, self.PAYLOADS_FILE, self.external_endpoint)
-                    flags = self.tried_xss[taint][2]
 
-                    # TODO: check that and make it better
-                    if flags.method == PayloadType.get:
+                    if parameter.situation == ParameterSituation.QUERY_STRING:
                         method = "G"
-                    elif flags.method == PayloadType.file:
+                    elif parameter.situation == ParameterSituation.MULTIPART:
                         method = "F"
                     else:
                         method = "P"
 
-                    await self.attempt_exploit(method, payloads, input_request, parameter, taint, request)
+                    await self.attempt_exploit(method, payloads, input_request, parameter.name, taint, request)
 
     def load_require(self, dependencies: list = None):
         if dependencies:
@@ -210,7 +178,7 @@ class ModulePermanentxss(Attack):
                     self.successful_xss = module.successful_xss
                     self.tried_xss = module.tried_xss
 
-    async def attempt_exploit(self, method, payloads, injection_request, parameter, taint, output_request):
+    async def attempt_exploit(self, method, payloads, injection_request, parameter: str, taint: str, output_request):
         timeouted = False
         page = injection_request.path
         saw_internal_error = False
@@ -218,17 +186,16 @@ class ModulePermanentxss(Attack):
 
         attack_mutator = Mutator(
             methods=method,
-            payloads=payloads,
             qs_inject=self.must_attack_query_string,
             parameters=[parameter],
             skip=self.options.get("skipped_parameters")
         )
 
-        for evil_request, xss_param, _xss_payload, xss_flags in attack_mutator.mutate(injection_request):
+        for evil_request, xss_param, payload_info in attack_mutator.mutate(injection_request, payloads):
             log_verbose(f"[¨] {evil_request}")
 
             try:
-                evil_response = await self.crawler.async_send(evil_request)
+                await self.crawler.async_send(evil_request)
             except ReadTimeout:
                 self.network_errors += 1
                 if timeouted:
@@ -240,17 +207,17 @@ class ModulePermanentxss(Attack):
                 log_orange(evil_request.http_repr())
                 log_orange("---")
 
-                if xss_param == "QUERY_STRING":
+                if xss_param.is_qs_injection:
                     anom_msg = Messages.MSG_QS_TIMEOUT
                 else:
-                    anom_msg = Messages.MSG_PARAM_TIMEOUT.format(xss_param)
+                    anom_msg = Messages.MSG_PARAM_TIMEOUT.format(xss_param.display_name)
 
                 await self.add_anom_medium(
                     request_id=injection_request.path_id,
                     category=Messages.RES_CONSUMPTION,
                     request=evil_request,
                     info=anom_msg,
-                    parameter=xss_param,
+                    parameter=xss_param.display_name,
                     wstg=RESOURCE_CONSUMPTION_WSTG_CODE
                 )
                 timeouted = True
@@ -268,25 +235,26 @@ class ModulePermanentxss(Attack):
 
                 if (
                         not response.is_redirect and
-                        valid_xss_content_type(evil_response) and  # TODO: check this twice
+                        valid_xss_content_type(response) and
                         check_payload(
                             self.DATA_DIR,
                             self.PAYLOADS_FILE,
                             self.external_endpoint,
                             self.proto_endpoint,
                             html,
-                            xss_flags,
+                            payload_info,
                             taint
                         )
                 ):
 
+                    vuln_type = XSS_NAME if payload_info.injection_type == "javascript" else HTMLI_NAME
                     if page == output_request.path:
                         description = (
-                            f"Permanent XSS vulnerability found via injection in the parameter {xss_param}"
+                            f"{vuln_type} vulnerability found via injection in the parameter {xss_param.display_name}"
                         )
                     else:
                         description = (
-                            f"Permanent XSS vulnerability found in {output_request.url} by injecting"
+                            f"{vuln_type} vulnerability found in {output_request.url} by injecting"
                             f" the parameter {parameter} of {page}"
                         )
 
@@ -295,26 +263,26 @@ class ModulePermanentxss(Attack):
 
                     await self.add_vuln_high(
                         request_id=injection_request.path_id,
-                        category=NAME,
+                        category=HTMLI_NAME if payload_info.injection_type == "html" else XSS_NAME,
                         request=evil_request,
-                        parameter=xss_param,
+                        parameter=xss_param.display_name,
                         info=description,
-                        wstg=WSTG_CODE,
+                        wstg=HTMLI_WSTG_CODE if payload_info.injection_type == "html" else XSS_WSTG_CODE,
                         response=response
                     )
 
-                    if xss_param == "QUERY_STRING":
+                    if xss_param.is_qs_injection:
                         injection_msg = Messages.MSG_QS_INJECT
                     else:
                         injection_msg = Messages.MSG_PARAM_INJECT
 
                     log_red("---")
-                    # TODO: a last parameter should give URL used to pass the vulnerable parameter
+                    # TODO: use a more detailed description like the one used for the report
                     log_red(
                         injection_msg,
-                        self.MSG_VULN,
+                        XSS_NAME if payload_info.injection_type == "javascript" else HTMLI_NAME,
                         output_url,
-                        xss_param
+                        xss_param.display_name,
                     )
 
                     if has_strong_csp(response, html):
@@ -326,18 +294,19 @@ class ModulePermanentxss(Attack):
 
                     # stop trying payloads and jump to the next parameter
                     break
+
                 if response.is_server_error and not saw_internal_error:
-                    if xss_param == "QUERY_STRING":
+                    if xss_param.is_qs_injection:
                         anom_msg = Messages.MSG_QS_500
                     else:
-                        anom_msg = Messages.MSG_PARAM_500.format(xss_param)
+                        anom_msg = Messages.MSG_PARAM_500.format(xss_param.display_name)
 
                     await self.add_anom_high(
                         request_id=injection_request.path_id,
                         category=Messages.ERROR_500,
                         request=evil_request,
                         info=anom_msg,
-                        parameter=xss_param,
+                        parameter=xss_param.display_name,
                         wstg=INTERNAL_ERROR_WSTG_CODE,
                         response=response
                     )

@@ -3,6 +3,7 @@ import os
 import re
 import warnings
 from typing import Set
+from collections import defaultdict
 from soupsieve.util import SelectorSyntaxError
 
 from wapitiCore.net.crawler import Response
@@ -302,15 +303,20 @@ def detect_versions_normalize_dict(rules: dict, contents) -> Set[str]:
     Add a new version of application if the content matches
     """
     versions = set()
+    lowercase_keys_content = {key.lower(): value for key, value in contents.items()}
     for (key, regex_params) in rules.items():
-        if key in contents:
+        # If the key is in lowercase, we erase 'contents' by its lowercased-key version
+        if (key in contents) or (key in (contents := lowercase_keys_content)):
             # regex_params is a list : [{"application_pattern": "..", "regex": "re.compile(..)"}, ...]
             for i, _ in enumerate(regex_params):
-                if re.search(regex_params[i]['regex'], contents[key]):
-                    # Use that special string to show we detected the app once but not necessarily a version
-                    versions.add("__detected__")
-                    versions.update(extract_version(regex_params[i], contents[key]))
-
+                for content_value in contents[key]:
+                    # If the regex fails, it can be due to the fact that we are looking for the key instead
+                    # The value can be set to the key so we compare
+                    if re.search(regex_params[i]['regex'], content_value) or\
+                       regex_params[i]['application_pattern'] == key.lower():
+                        # Use that special string to show we detected the app once but not necessarily a version
+                        versions.add("__detected__")
+                        versions.update(extract_version(regex_params[i], content_value))
     return versions
 
 
@@ -332,10 +338,19 @@ class Wappalyzer:
         # Copy some values to make sure they aren't processed more than once
         self.html = Html(self._html_code, self._url)
         self._scripts = self.html.scripts[:]
-        self._cookies = dict(web_content.cookies)
-        self._headers = web_content.headers
-        self._metas = dict(self.html.metas)
         self._js = js
+        # dict(web_content.headers)->{"Server":"Nginx, Apache, Redis" ...}
+        # With the workaround below ->{"Server":["Nginx", "Apache", "Redis"] ...}
+        # Way better for processing instead of splitting on " ,"
+        self._headers = defaultdict(list)
+        for attribute, value in web_content.headers.multi_items():
+            self._headers[attribute].append(value)
+        # Same with meta tags
+        self._metas = defaultdict(list)
+        for attribute, value in self.html.multi_meta:
+            self._metas[attribute].append(value)
+        # Cookies can't have multiple values but we must keep a dict->list format
+        self._cookies = {key: [value] for key, value in web_content.cookies.items()}
 
     def detect_application_versions(self, application: dict) -> Set[str]:
         """
@@ -499,22 +514,32 @@ class Wappalyzer:
             versions = self.detect_application_versions(applications[application_name])
             if versions:
                 versions.remove("__detected__")
-                detected_versions[application_name] = {"name": application_name, "versions": list(versions)}
+                detected_versions[application_name] = {
+                    "name": application_name, "versions": list(versions),
+                    "cpe": applications.get(application_name).get("cpe", "")
+                }
                 detected_applications_names.add(application_name)
 
         for application_name, versions in self._js.items():
             detected_applications_names.add(application_name)
             if application_name not in detected_versions:
-                detected_versions[application_name] = {"name": application_name, "versions": []}
+                detected_versions[application_name] = {
+                    "name": application_name, "versions": [],
+                    "cpe": applications.get(application_name).get("cpe", "")
+                }
 
             uniq_versions = set(detected_versions[application_name]["versions"])
             uniq_versions.update(versions)
-            detected_versions[application_name] = {"name": application_name, "versions": list(uniq_versions)}
-
+            detected_versions[application_name] = {
+                "name": application_name, "versions": list(uniq_versions),
+                "cpe": applications.get(application_name).get("cpe", "")
+            }
         # Add implied applications
         for application_name in self.get_rec_implied_applications(detected_applications_names):
             # If we found it in another way, don't overwrite!
             if application_name not in detected_versions:
-                detected_versions[application_name] = {"name": application_name, "versions": []}
-
+                detected_versions[application_name] = {
+                    "name": application_name, "versions": [],
+                    "cpe": applications.get(application_name).get("cpe", "")
+                }
         return detected_versions

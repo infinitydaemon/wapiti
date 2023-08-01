@@ -306,9 +306,6 @@ class Wapiti:
                     stop_event,
                     self.crawler_configuration,
                 )
-                if hasattr(class_instance, "set_timeout"):
-                    class_instance.set_timeout(crawler.timeout)
-
             except Exception as exception:  # pylint: disable=broad-except
                 # Catch every possible exceptions and print it
                 logging.error(f"[!] Module {mod_name} seems broken and will be skipped")
@@ -683,6 +680,10 @@ class Wapiti:
     def add_excluded_url(self, url_or_pattern: str):
         """Specify a URL to exclude from the scan. Can be called several times."""
         self._excluded_urls.append(url_or_pattern)
+
+    @property
+    def excluded_urls(self) -> List[str]:
+        return self._excluded_urls
 
     def set_cookie_file(self, cookie: str):
         """Load session cookies from a cookie file"""

@@ -19,12 +19,14 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 import asyncio
 from typing import Optional
+from os.path import join as path_join
 
 from httpx import RequestError
 
 from wapitiCore.main.log import log_red, log_verbose
 from wapitiCore.attack.attack import Attack
 from wapitiCore.net import Request, Response
+from wapitiCore.definitions.buster import NAME, WSTG_CODE
 
 
 class ModuleBuster(Attack):
@@ -32,7 +34,7 @@ class ModuleBuster(Attack):
     Brute force paths on the web-server to discover hidden files and directories.
     """
 
-    PAYLOADS_FILE = "busterPayloads.txt"
+    PATHS_FILE = "busterPayloads.txt"
 
     name = "buster"
 
@@ -54,19 +56,26 @@ class ModuleBuster(Attack):
             self.network_errors += 1
             return False
 
-        if response.redirection_url:
+        if response.redirection_url and response.is_directory_redirection:
             loc = response.redirection_url
-            if response.is_directory_redirection:
-                log_red(f"Found webpage {loc}")
-                self.new_resources.append(loc)
-            else:
-                log_red(f"Found webpage {page.path}")
-                self.new_resources.append(page.path)
-            return True
-
-        if response.status not in [403, 404, 429]:
+            log_red(f"Found webpage {loc}")
+            self.new_resources.append(loc)
+            await self.add_addition(
+                category=NAME,
+                request=page,
+                info=f"Found webpage {loc} on {url}",
+                wstg=WSTG_CODE
+            )
+        elif (response.redirection_url and not response.is_directory_redirection) \
+                or response.status not in [403, 404, 429]:
             log_red(f"Found webpage {page.path}")
             self.new_resources.append(page.path)
+            await self.add_addition(
+                category=NAME,
+                request=page,
+                info=f"Found webpage {page.path} on {url}",
+                wstg=WSTG_CODE
+            )
             return True
 
         return False
@@ -87,40 +96,40 @@ class ModuleBuster(Attack):
 
         tasks = set()
         pending_count = 0
-        payload_iterator = iter(self.payloads)
 
-        while True:
-            if pending_count < self.options["tasks"] and not self._stop_event.is_set():
-                try:
-                    candidate, __ = next(payload_iterator)
-                except StopIteration:
-                    pass
-                else:
-                    url = path + candidate
-                    if url not in self.known_dirs and url not in self.known_pages and url not in self.new_resources:
-                        task = asyncio.create_task(self.check_path(url))
-                        tasks.add(task)
+        with open(path_join(self.DATA_DIR, self.PATHS_FILE), encoding="utf-8", errors="ignore") as wordlist:
+            while True:
+                if pending_count < self.options["tasks"] and not self._stop_event.is_set():
+                    try:
+                        candidate = next(wordlist).strip()
+                    except StopIteration:
+                        pass
+                    else:
+                        url = path + candidate
+                        if url not in self.known_dirs and url not in self.known_pages and url not in self.new_resources:
+                            task = asyncio.create_task(self.check_path(url))
+                            tasks.add(task)
 
-            if not tasks:
-                break
+                if not tasks:
+                    break
 
-            done_tasks, pending_tasks = await asyncio.wait(
-                tasks,
-                timeout=0.01,
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            pending_count = len(pending_tasks)
-            for task in done_tasks:
-                try:
-                    await task
-                except RequestError:
-                    self.network_errors += 1
-                tasks.remove(task)
-
-            if self._stop_event.is_set():
-                for task in pending_tasks:
-                    task.cancel()
+                done_tasks, pending_tasks = await asyncio.wait(
+                    tasks,
+                    timeout=0.01,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                pending_count = len(pending_tasks)
+                for task in done_tasks:
+                    try:
+                        await task
+                    except RequestError:
+                        self.network_errors += 1
                     tasks.remove(task)
+
+                if self._stop_event.is_set():
+                    for task in pending_tasks:
+                        task.cancel()
+                        tasks.remove(task)
 
     async def attack(self, request: Request, response: Optional[Response] = None):
         self.finished = True
