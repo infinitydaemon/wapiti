@@ -12,8 +12,8 @@ EXISTING_MODULES = {
     "csrf", "drupal_enum",
     "exec", "file",
     "htaccess", "htp",
-    "http_headers", "log4shell",
-    "methods", "nikto",
+    "http_headers", "https_redirect",
+    "log4shell", "methods", "nikto",
     "permanentxss", "redirect",
     "shellshock", "sql",
     "ssl", "ssrf",
@@ -21,6 +21,8 @@ EXISTING_MODULES = {
     "wapp", "wp_enum",
     "xss", "xxe", ""
 }
+# Empty string in EXISTING_MODULES is because Wapiti can be
+# launched without any module, only to crawl a website for example
 
 TREE_CHECKER = {
     "vulnerabilities": {'Backup file': [{'curl_command': '',
@@ -381,6 +383,23 @@ TREE_CHECKER = {
                                                 'referer': '',
                                                 'wstg': []}],
                         'TLS/SSL misconfigurations': [{'curl_command': '',
+                                                       'detail': {
+                                                           'response': {
+                                                               'body': '',
+                                                               'headers': [],
+                                                               'status_code': 0
+                                                           }
+                                                       },
+                                                       'http_request': '',
+                                                       'info': '',
+                                                       'level': 0,
+                                                       'method': '',
+                                                       'module': '',
+                                                       'parameter': '',
+                                                       'path': '',
+                                                       'referer': '',
+                                                       'wstg': []}],
+                        'Unencrypted Channels': [{'curl_command': '',
                                                        'detail': {
                                                            'response': {
                                                                'body': '',
